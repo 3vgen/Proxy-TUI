@@ -485,11 +485,21 @@ def vpn_enabled():
 
 
 def set_vpn_enabled(on):
-    """Start/stop the sing-box service. Returns the new active state."""
+    """Start/stop the sing-box service. Returns the new active state.
+
+    Cron (autocheck) follows the VPN state: it is installed when the VPN
+    starts and removed when it stops, so autocheck cannot re-enable the VPN
+    right after a manual shutdown.
+    """
     action = "start" if on else "stop"
     sudo(["systemctl", action, "sing-box"])
     time.sleep(3 if on else 1)
-    return vpn_enabled()
+    active = vpn_enabled()
+    if on and active:
+        cron_apply(True)
+    elif not on and not active:
+        cron_apply(False)
+    return active
 
 
 # ---------------------------------------------------------------- display
@@ -648,7 +658,8 @@ def cmd_autocheck(nodes, results, jobs=6):
     return False
 
 
-def cmd_cron(action):
+def cron_apply(enabled):
+    """Install/remove the hourly autocheck cron entry. Idempotent."""
     marker = os.path.join(DIR, "vpn") + " autocheck"
     cur = ""
     try:
@@ -657,22 +668,26 @@ def cmd_cron(action):
     except Exception:
         cur = ""
     lines = [l for l in cur.splitlines() if l.strip() and marker not in l]
-    if action == "install":
+    if enabled:
         lines.append("0 * * * * %s >> %s 2>&1" %
                      (os.path.join(DIR, "vpn") + " autocheck", AUTOCHECK_LOG))
+    p = subprocess.run(["crontab", "-"],
+                       input=("\n".join(lines) + "\n").encode(),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return p.returncode == 0
+
+
+def cmd_cron(action):
+    if action == "install":
+        ok = cron_apply(True)
         msg = "cron установлен: авто-проверка каждый час"
     elif action == "remove":
+        ok = cron_apply(False)
         msg = "cron autocheck удалён"
     else:
         log("используй: vpn cron [install|remove]")
         return
-    p = subprocess.run(["crontab", "-"],
-                       input=("\n".join(lines) + "\n").encode(),
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if p.returncode != 0:
-        log("Ошибка crontab: %s" % p.stderr.decode())
-        return
-    log(msg)
+    log(msg if ok else "Ошибка crontab")
 
 
 def cmd_ping_all(nodes, results):
