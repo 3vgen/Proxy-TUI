@@ -102,6 +102,16 @@ vpn cron install|remove  # поставить/снять ежечасную ав
 ```
 Оба читают пароль sudo из `~/.sudo_password` (см. [[Security]]).
 
+## SSH-bypass (входящий SSH мимо TUN)
+```bash
+sudo ~/vpn-tool/ssh-bypass.sh status      # показать ip rule + nftables
+sudo ~/vpn-tool/ssh-bypass.sh install     # поставить (idempotent)
+sudo ~/vpn-tool/ssh-bypass.sh uninstall   # снять
+systemctl status vpn-ssh-bypass           # юнит (enabled, oneshot)
+```
+Держит входящий SSH доступным при включённом VPN на сервере. Подробности и
+причина: [[Networking-Troubleshooting]] п.8.
+
 ## Напрямую через systemd
 ```bash
 systemctl {start|stop|restart|status} sing-box

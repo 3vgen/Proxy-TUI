@@ -1,0 +1,13 @@
+[Unit]
+Description=SSH bypass for sing-box TUN VPN (keep inbound SSH reachable)
+After=network-online.target
+WantedBy=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/evgeniy/vpn-tool/ssh-bypass.sh install
+ExecStop=/home/evgeniy/vpn-tool/ssh-bypass.sh uninstall
+
+[Install]
+WantedBy=multi-user.target

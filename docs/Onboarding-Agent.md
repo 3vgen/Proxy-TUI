@@ -43,11 +43,15 @@ ssh homeserver 'systemctl status sing-box --no-pager | head -15'
 - `curl -s https://ipinfo.io/json` показывает **RU** или сайты 403 → VPN не на том узле → `vpn use auto` / `test all`.
 - `systemctl is-active sing-box` = `failed`/`activating` → смотреть `journalctl -u sing-box -n 50` (нужен sudo); вероятно конфиг: проверь синтаксис `sing-box check -c /etc/sing-box/config.json`.
 - Трафик через тун молчит при active → п.1 [[Networking-Troubleshooting]] (UFW!) и п.2 (route_exclude).
-- Ты «потерял» сеть → `ssh homeserver 'systemctl stop sing-box'` (SSH на LAN/проброшенный порт не зависит от tun; вход по `homeserver` идёт на публичный IP роутера → останется доступен).
+- Ты «потерял» сеть → `ssh homeserver 'systemctl stop sing-box'` (прямой интернет возвращается).
+  ⚠️ Если VPN на сервере **включён**, а SSH тем не менее виснет — проверь SSH-bypass:
+  `sudo ~/vpn-tool/ssh-bypass.sh status` / `systemctl status vpn-ssh-bypass`
+  (см. [[Networking-Troubleshooting]] п.8).
 
 ## 6. Что НЕ трогать без нужды
 - `/etc/sing-box/config.json` руками (если не понимаешь генерацию); правильный путь — `vpn use …`.
 - Правила UFW для tun0.
+- SSH-bypass: ip rule `8500 fwmark 0x1` и nftables-таблицу `inet vpn_ssh_bypass` (без них входящий SSH рвётся при включённом VPN).
 - `sub_url`, `cache/*` — приватные данные.
 
 ## 7. После работы

@@ -66,4 +66,7 @@ ssh homeserver './vpn-tool/vpn-on.sh'
 - Подписка **меняется** (была 14 узлов, стала 15) — всегда делать `refresh` перед анализом.
 - Egress сейчас NL (Amsterdam), конфиг `auto` (urltest). Проверено: Anthropic 404, OpenAI 421, Docker Hub 401.
 - **Авто-ротация включена**: cron каждый час гоняет `vpn autocheck` (лог `cache/autocheck.log`).
+- **SSH работает при включённом VPN на сервере**: входящий SSH маршрутизируется напрямую
+  (`ssh-bypass.sh` + юнит `vpn-ssh-bypass.service`), иначе асимметричный маршрут рвёт
+  соединение (см. [[Networking-Troubleshooting]] п.8).
 - Ошибки, которые уже решены и легко могут вернуться: см. [[Networking-Troubleshooting]].

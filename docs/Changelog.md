@@ -56,3 +56,26 @@
 - Только 2 из 15 узлов реально туннелируют зарубежный трафик (остальные — reality-ошибки/сервер лежит).
 - Нет IPv6-покрытия в tun (только IPv4).
 - `cache/history.jsonl` растёт без ротации (см. [[Roadmap]]).
+
+## 2026-09-07 (поздний вечер) — фикс входящего SSH при включённом VPN
+
+**Проблема (от пользователя):** «если на моём компьютере выключен VPN, а на сервере
+включён — не могу зайти по SSH».
+
+**Диагноз:** при `auto_route` весь не-private трафик уходит в tun0. Ответы на
+входящие SSH-соединения уходят в тун с IP VPN-узла (асимметричный маршрут) →
+рукопожатие не завершается. Раньше «работало» случайно: exit-IP VPN на Mac совпадал
+с узлом подписки (`5.129.218.70` = узел #4), а IP узлов исключены из туна.
+
+**Решение:**
+1. Скрипт `~/vpn-tool/ssh-bypass.sh` (`install|uninstall|status`) — nftables-маркировка
+   входящего SSH (`tcp dport 22 → ct mark 0x1`) + копирование в packet mark, и
+   ip rule `8500: fwmark 0x1 lookup main` (pref < 9000, выигрывает у правил sing-box).
+2. systemd-юнит `vpn-ssh-bypass.service` (oneshot, enabled) — ставит правило при
+   загрузке; независим от sing-box, переживает `vpn use`/restart.
+3. Проверено: `ip route get 8.8.8.8 mark 0x1` → `dev wlp1s0` (прямо), без mark →
+   `dev tun0`; счётчики nft растут; SSH живёт при `systemctl restart sing-box`;
+   egress остаётся VPN (113.30.152.105).
+
+Обновлено: [[Infrastructure]], [[Networking-Troubleshooting]] (п.8), [[Home]],
+[[Onboarding-Agent]].

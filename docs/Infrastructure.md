@@ -31,6 +31,7 @@ ssh homeserver 'cmd'      # одна команда (основной режим
 | `vpntui.py` | Полноэкранный TUI на Textual (запускается через `.venv`) |
 | `.venv/` | venv с `textual` (для TUI) |
 | `vpn-on.sh` / `vpn-off.sh` | Вкл/выкл глобального VPN |
+| `ssh-bypass.sh` | Маркировка входящего SSH + ip rule (обходит TUN, см. ниже) |
 | `sing-box` | Бинарник sing-box (копия; основной в `/usr/local/bin`) |
 | `sub_url` | URL подписки (одна строка) |
 | `cache/sub.raw` | Сырой ответ подписки |
@@ -73,6 +74,24 @@ WantedBy=multi-user.target
 - `auto_route: true`, `strict_route: true`
 - ip rules: `9001` всё → таблица `2022` (default через tun), `9002` dport 53 → main, спец-правила для lo
 - Таблица `2022` содержит разбитый default-маршрут через `172.19.0.2 dev tun0`, из которого «вырезаны»/исключены адреса узлов (см. route_exclude_address)
+
+## SSH-bypass (входящий SSH мимо TUN)
+Чтобы входящий SSH (`ssh homeserver`) работал, когда VPN на сервере включён,
+ответы на SSH-соединения маршрутизируются **напрямую** (мимо tun), иначе уходят
+в тун с IP узла → асимметричный маршрут → рукопожатие рвётся (см.
+[[Networking-Troubleshooting]] п.8).
+
+- nftables-таблица `inet vpn_ssh_bypass`: prerouting `tcp dport 22 → ct mark 0x1`,
+  output `ct mark 0x1 → meta mark 0x1`.
+- ip rule `8500: fwmark 0x1 lookup main` (pref < 9000, выигрывает у правил sing-box).
+- Скрипт: `~/vpn-tool/ssh-bypass.sh` (`install|uninstall|status`).
+- Юнит: `/etc/systemd/system/vpn-ssh-bypass.service` (oneshot, enabled — ставит
+  правило при загрузке; независим от sing-box, переживает его restart).
+
+```bash
+sudo ~/vpn-tool/ssh-bypass.sh status
+systemctl status vpn-ssh-bypass --no-pager
+```
 
 ## Проверка здоровья
 ```bash
