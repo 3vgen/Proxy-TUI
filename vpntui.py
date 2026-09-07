@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """Textual TUI for the VLESS Reality subscription manager.
 
-Full-screen interface: arrow-key navigation, ping (with animation), full exit
-test, speed test, connect / auto / best, subscription refresh and a VPN
-on/off toggle. Shows the currently connected node and egress in the status bar.
+Minimal full-screen interface: a compact status line with a VPN on/off
+button, the node table, and a row of quick-action buttons. Arrow keys select
+a node, Enter (or click) connects. All actions are also reachable via
+keyboard (see BINDINGS).
 """
 import os
 import sys
@@ -16,8 +17,8 @@ import vpntool as vt
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import Header, Footer, Static, DataTable, LoadingIndicator
-from textual import work
+from textual.widgets import Button, Static, DataTable, LoadingIndicator
+from textual import on, work
 from rich.text import Text
 
 COL_IDX = "idx"
@@ -29,30 +30,36 @@ COLUMNS = (COL_IDX, COL_NAME, COL_HOST, COL_PING, COL_EXIT)
 
 
 class VpnApp(App):
-    TITLE = "VLESS Reality Manager"
-    SUB_TITLE = "Enter подключить · ↑/↓ или j/k выбор · o вкл/выкл VPN"
+    TITLE = "VPN"
 
     BINDINGS = [
-        Binding("p", "ping", "Ping"),
-        Binding("P", "ping_all", "Ping все"),
-        Binding("t", "test", "Тест"),
-        Binding("s", "speed", "Скорость"),
-        Binding("a", "auto", "Auto"),
-        Binding("b", "best", "Best"),
-        Binding("r", "refresh", "Обновить"),
-        Binding("o", "toggle", "VPN on/off"),
-        Binding("g", "status", "Статус"),
+        Binding("p", "ping", "Ping", show=False),
+        Binding("P", "ping_all", "Ping все", show=False),
+        Binding("t", "test", "Тест", show=False),
+        Binding("s", "speed", "Скорость", show=False),
+        Binding("a", "auto", "Auto", show=False),
+        Binding("b", "best", "Best", show=False),
+        Binding("r", "refresh", "Обновить", show=False),
+        Binding("o", "toggle", "VPN on/off", show=False),
+        Binding("g", "status", "Статус", show=False),
         Binding("j", "move_down", "", show=False),
         Binding("k", "move_up", "", show=False),
-        Binding("q", "quit", "Выход"),
+        Binding("q", "quit", "Выход", show=False),
     ]
 
     CSS = """
-    #statusbar { width: 1fr; height: 1; padding: 0 1; background: $boost; }
+    #topbar { height: 1; padding: 0 1; }
+    #statusbar { width: 1fr; }
     #spinner { width: 3; height: 1; display: none; }
+    #power { margin-left: 1; min-width: 16; }
+    #nodes { height: 1fr; border: none; }
+    #actions { height: 3; align: center middle; }
+    #actions Button { margin: 0 1; min-width: 12; }
     #notify { height: 1; padding: 0 1; color: $text-muted; }
-    DataTable { height: 1fr; }
     """
+
+    HINT = ("↑↓ выбор · Enter подключить · p ping · t тест · "
+            "a auto · b best · o вкл/выкл · q выход")
 
     def __init__(self):
         super().__init__()
@@ -64,13 +71,17 @@ class VpnApp(App):
 
     # ------------------------------------------------------------- compose
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Horizontal():
+        with Horizontal(id="topbar"):
             yield Static("", id="statusbar")
             yield LoadingIndicator(id="spinner")
+            yield Button("…", id="power", variant="error")
         yield DataTable(id="nodes", cursor_type="row", zebra_stripes=True)
-        yield Static("", id="notify")
-        yield Footer()
+        with Horizontal(id="actions"):
+            yield Button("Auto", id="auto", variant="primary", compact=True)
+            yield Button("Best", id="best", variant="primary", compact=True)
+            yield Button("Обновить", id="refresh", compact=True)
+            yield Button("Выход", id="quit", compact=True)
+        yield Static(self.HINT, id="notify")
 
     def _table(self) -> DataTable:
         return self.query_one("#nodes", DataTable)
@@ -78,7 +89,15 @@ class VpnApp(App):
     def _spinner(self) -> LoadingIndicator:
         return self.query_one("#spinner", LoadingIndicator)
 
+    def _power(self) -> Button:
+        return self.query_one("#power", Button)
+
+    def _notify(self) -> Static:
+        return self.query_one("#notify", Static)
+
     def on_mount(self):
+        for btn in self.query(Button):
+            btn.can_focus = False
         self.nodes = vt.load_nodes()
         self.results = vt.load_results()
         table = self._table()
@@ -146,18 +165,30 @@ class VpnApp(App):
 
     def _render_statusbar(self):
         s = self.status or {}
-        t = Text()
-        t.append("VPN: ")
-        if s.get("active") == "active":
-            t.append("ВКЛ", style="bold green")
+        on = s.get("active") == "active"
+        final = s.get("final", "")
+        if final == "auto":
+            target = "auto"
+        elif final.startswith("n") and final[1:].isdigit():
+            target = "#" + final[1:]
         else:
-            t.append("ВЫКЛ", style="bold red")
-        t.append("   подключён: ")
-        t.append(s.get("target", "…"), style="bold")
-        t.append("   egress: ")
-        t.append("%s %s" % (s.get("country", "—"), s.get("egress", "—")),
+            target = final or "—"
+        t = Text()
+        t.append("VPN ", style="bold")
+        t.append("ВКЛ" if on else "ВЫКЛ",
+                 style=("bold green" if on else "bold red"))
+        t.append(" · %s" % target, style="bold")
+        t.append(" · %s %s" % (s.get("country", "—"), s.get("egress", "—")),
                  style="cyan")
         self.query_one("#statusbar", Static).update(t)
+
+        power = self._power()
+        if on:
+            power.label = "Выключить VPN"
+            power.variant = "error"
+        else:
+            power.label = "Включить VPN"
+            power.variant = "success"
 
     # ------------------------------------------------------------- helpers
     def _sel(self):
@@ -167,13 +198,13 @@ class VpnApp(App):
     def _busy_start(self, msg):
         self.busy += 1
         self._spinner().display = True
-        self.query_one("#notify", Static).update(msg)
+        self._notify().update(msg)
 
     def _busy_end(self, msg):
         self.busy = max(0, self.busy - 1)
         if self.busy == 0:
             self._spinner().display = False
-        self.query_one("#notify", Static).update(msg)
+        self._notify().update(msg or self.HINT)
 
     def _target_idx_from_status(self):
         final = (self.status or {}).get("final", "")
@@ -374,6 +405,27 @@ class VpnApp(App):
     def _toggle_done(self):
         self._busy_end("")
         self.refresh_status()
+
+    # ------------------------------------------------------------- buttons
+    @on(Button.Pressed, "#power")
+    def _press_power(self):
+        self.action_toggle()
+
+    @on(Button.Pressed, "#auto")
+    def _press_auto(self):
+        self.action_auto()
+
+    @on(Button.Pressed, "#best")
+    def _press_best(self):
+        self.action_best()
+
+    @on(Button.Pressed, "#refresh")
+    def _press_refresh(self):
+        self.action_refresh()
+
+    @on(Button.Pressed, "#quit")
+    def _press_quit(self):
+        self.exit()
 
 
 def main():
