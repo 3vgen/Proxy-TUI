@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""VLESS Reality subscription manager — CLI entry point.
+
+Non-interactive subcommands for scripts/agents. With no arguments, launches
+the full-screen TUI (vpntui.py via the project venv).
+"""
+import json
+import os
+import sys
+
+import vpntool as vt
+
+
+def launch_tui():
+    tui = os.path.join(vt.DIR, "vpntui.py")
+    venv_py = os.path.join(vt.DIR, ".venv", "bin", "python3")
+    py = venv_py if os.path.exists(venv_py) else sys.executable
+    os.execv(py, [py, tui])
+
+
+def main():
+    args = sys.argv[1:]
+    results = vt.load_results()
+
+    if args and args[0] in ("refresh",):
+        nodes = vt.cmd_refresh(vt.load_nodes())
+        with open(vt.NODES_FILE, "w") as f:
+            json.dump(nodes, f, ensure_ascii=False, indent=2)
+        return
+    if args and args[0] in ("status",):
+        vt.cmd_status(vt.load_nodes(), results)
+        return
+
+    refresh = args and args[0] == "--refresh"
+    nodes = vt.load_nodes(refresh=refresh)
+
+    if args and args[0] in ("list",) or (args and args[0] == "--refresh"
+                                         and len(args) == 1):
+        vt.print_table(nodes, results)
+        return
+
+    # non-interactive one-shots
+    if args:
+        if args[0] == "pingall":
+            vt.cmd_ping_all(nodes, results)
+            vt.print_table(nodes, results)
+        elif args[0] == "test":
+            vt.cmd_full_test(nodes, results,
+                             args[1] if len(args) > 1 else "all")
+            vt.print_table(nodes, results)
+        elif args[0] == "speed":
+            vt.cmd_speed(nodes, results, args[1])
+        elif args[0] == "use":
+            vt.apply_node(nodes, args[1], results)
+        elif args[0] == "history":
+            vt.cmd_history(nodes, results)
+        elif args[0] == "autocheck":
+            sys.exit(0 if vt.cmd_autocheck(nodes, results) else 1)
+        elif args[0] == "cron":
+            vt.cmd_cron(args[1] if len(args) > 1 else None)
+        else:
+            print("usage: vpn [list|pingall|test [n|all]|speed <n>|"
+                  "use <n|auto|best>|status|history|autocheck|"
+                  "cron <install|remove>|refresh]")
+        return
+
+    launch_tui()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# --- project secrets / runtime artifacts (do not commit) ---
+# private subscription URL (contains access key)
+sub_url
+
+# cached node data and test results (contain node UUIDs/keys)
+cache/
+
+# generated configs (contain node uuid/pbk/sid)
+configs/
+_apply.json
+_tmp_cfg*.json
+
+# local sing-box binary copy (large, not source)
+sing-box
