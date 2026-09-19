@@ -2,10 +2,9 @@
 # -*- coding: utf-8 -*-
 """Textual TUI for the VLESS Reality subscription manager.
 
-Minimal full-screen interface: a compact status line with a VPN on/off
-button, the node table, and a row of quick-action buttons. Arrow keys select
-a node, Enter (or click) connects. All actions are also reachable via
-keyboard (see BINDINGS).
+Keyboard-driven, minimal, terminal-native interface (OpenCode-like): a single
+status line up top (VPN state · target · egress), a plain node table, and a dim
+footer with key bindings. Arrow keys select a node, Enter (or click) connects.
 """
 import os
 import sys
@@ -17,7 +16,7 @@ import vpntool as vt
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import Button, Static, DataTable, LoadingIndicator
+from textual.widgets import Static, DataTable, LoadingIndicator
 from textual import on, work
 from rich.text import Text
 
@@ -30,36 +29,57 @@ COLUMNS = (COL_IDX, COL_NAME, COL_HOST, COL_PING, COL_EXIT)
 
 
 class VpnApp(App):
-    TITLE = "VPN"
+    TITLE = "vpn"
 
     BINDINGS = [
         Binding("p", "ping", "Ping", show=False),
-        Binding("P", "ping_all", "Ping все", show=False),
-        Binding("t", "test", "Тест", show=False),
-        Binding("s", "speed", "Скорость", show=False),
+        Binding("P", "ping_all", "Ping all", show=False),
+        Binding("t", "test", "Test", show=False),
+        Binding("s", "speed", "Speed", show=False),
         Binding("a", "auto", "Auto", show=False),
         Binding("b", "best", "Best", show=False),
-        Binding("r", "refresh", "Обновить", show=False),
+        Binding("r", "refresh", "Refresh", show=False),
         Binding("o", "toggle", "VPN on/off", show=False),
-        Binding("g", "status", "Статус", show=False),
+        Binding("g", "status", "Status", show=False),
         Binding("j", "move_down", "", show=False),
         Binding("k", "move_up", "", show=False),
-        Binding("q", "quit", "Выход", show=False),
+        Binding("q", "quit", "Quit", show=False),
     ]
 
     CSS = """
-    #topbar { height: 1; padding: 0 1; }
-    #statusbar { width: 1fr; }
-    #spinner { width: 3; height: 1; display: none; }
-    #power { margin-left: 1; min-width: 16; }
-    #nodes { height: 1fr; border: none; }
-    #actions { height: 3; align: center middle; }
-    #actions Button { margin: 0 1; min-width: 12; }
-    #notify { height: 1; padding: 0 1; color: $text-muted; }
+    #statusbar {
+        height: 1;
+        padding: 0 1;
+        border-bottom: solid $panel;
+    }
+    #statustext { width: 1fr; }
+    #spinner { width: 2; height: 1; display: none; }
+    #nodes {
+        height: 1fr;
+        border: none;
+        padding: 0 1;
+    }
+    #nodes:focus { border: none; }
+    DataTable { background: transparent; }
+    DataTable > .datatable--header {
+        background: transparent;
+        color: $text-muted;
+        text-style: bold;
+    }
+    DataTable > .datatable--cursor {
+        background: $boost;
+        color: $text;
+    }
+    #notify {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+        border-top: solid $panel;
+    }
     """
 
-    HINT = ("↑↓ выбор · Enter подключить · p ping · t тест · "
-            "a auto · b best · o вкл/выкл · q выход")
+    HINT = ("↑↓ select   enter connect   p ping   P ping all   t test   "
+            "s speed   a auto   b best   o vpn on/off   r refresh   q quit")
 
     def __init__(self):
         super().__init__()
@@ -71,16 +91,10 @@ class VpnApp(App):
 
     # ------------------------------------------------------------- compose
     def compose(self) -> ComposeResult:
-        with Horizontal(id="topbar"):
-            yield Static("", id="statusbar")
+        with Horizontal(id="statusbar"):
+            yield Static("", id="statustext")
             yield LoadingIndicator(id="spinner")
-            yield Button("…", id="power", variant="error")
-        yield DataTable(id="nodes", cursor_type="row", zebra_stripes=True)
-        with Horizontal(id="actions"):
-            yield Button("Auto", id="auto", variant="primary", compact=True)
-            yield Button("Best", id="best", variant="primary", compact=True)
-            yield Button("Обновить", id="refresh", compact=True)
-            yield Button("Выход", id="quit", compact=True)
+        yield DataTable(id="nodes", cursor_type="row")
         yield Static(self.HINT, id="notify")
 
     def _table(self) -> DataTable:
@@ -89,21 +103,16 @@ class VpnApp(App):
     def _spinner(self) -> LoadingIndicator:
         return self.query_one("#spinner", LoadingIndicator)
 
-    def _power(self) -> Button:
-        return self.query_one("#power", Button)
-
     def _notify(self) -> Static:
         return self.query_one("#notify", Static)
 
     def on_mount(self):
-        for btn in self.query(Button):
-            btn.can_focus = False
         self.nodes = vt.load_nodes()
         self.results = vt.load_results()
         table = self._table()
         table.add_column("#", key=COL_IDX, width=4)
-        table.add_column("Узел", key=COL_NAME, width=28)
-        table.add_column("host:port", key=COL_HOST, width=22)
+        table.add_column("node", key=COL_NAME, width=28)
+        table.add_column("host", key=COL_HOST, width=22)
         table.add_column("ping", key=COL_PING, width=8)
         table.add_column("exit", key=COL_EXIT, width=16)
         self._rebuild_table()
@@ -128,7 +137,7 @@ class VpnApp(App):
         connected = (self.target_idx == i)
 
         idx_t = Text(str(i), style="dim")
-        name_t = Text(("● " if connected else "") + vt.short_name(n), style=st)
+        name_t = Text(("▸ " if connected else "") + vt.short_name(n), style=st)
         if connected:
             name_t.stylize("bold")
         host_t = Text("%s:%d" % (n["host"], n["port"]), style="dim")
@@ -166,29 +175,18 @@ class VpnApp(App):
     def _render_statusbar(self):
         s = self.status or {}
         on = s.get("active") == "active"
-        final = s.get("final", "")
-        if final == "auto":
-            target = "auto"
-        elif final.startswith("n") and final[1:].isdigit():
-            target = "#" + final[1:]
-        else:
-            target = final or "—"
+        target = s.get("target") or s.get("final") or "—"
         t = Text()
-        t.append("VPN ", style="bold")
-        t.append("ВКЛ" if on else "ВЫКЛ",
-                 style=("bold green" if on else "bold red"))
-        t.append(" · %s" % target, style="bold")
-        t.append(" · %s %s" % (s.get("country", "—"), s.get("egress", "—")),
+        t.append("vpn ", style="bold")
+        t.append("●", style="green" if on else "red")
+        t.append(" %s" % ("on" if on else "off"),
+                 style="bold green" if on else "bold red")
+        t.append("   ")
+        t.append(target, style="bold")
+        t.append("   ")
+        t.append("%s · %s" % (s.get("country") or "—", s.get("egress") or "—"),
                  style="cyan")
-        self.query_one("#statusbar", Static).update(t)
-
-        power = self._power()
-        if on:
-            power.label = "Выключить VPN"
-            power.variant = "error"
-        else:
-            power.label = "Включить VPN"
-            power.variant = "success"
+        self.query_one("#statustext", Static).update(t)
 
     # ------------------------------------------------------------- helpers
     def _sel(self):
@@ -228,7 +226,7 @@ class VpnApp(App):
         self._refresh_all_rows()
 
     def action_status(self):
-        self._busy_start("Обновляю статус…")
+        self._busy_start("refreshing status…")
         self.refresh_status()
 
     # ------------------------------------------------------------- navigation
@@ -243,7 +241,7 @@ class VpnApp(App):
         idx = self._sel()
         if idx is None:
             return
-        self._busy_start("Пинг #%d %s…" % (idx, vt.short_name(self.nodes[idx])))
+        self._busy_start("ping #%d %s…" % (idx, vt.short_name(self.nodes[idx])))
         self._ping_worker(idx)
 
     @work(thread=True)
@@ -256,11 +254,11 @@ class VpnApp(App):
         r["handshake_ms"] = ms
         vt.save_results(self.results)
         self._refresh_row(idx)
-        self._busy_end("Пинг #%d: %s" % (idx, "%dms" % ms
-                       if ms is not None else "недоступен"))
+        self._busy_end("ping #%d: %s" % (idx, "%dms" % ms
+                       if ms is not None else "unreachable"))
 
     def action_ping_all(self):
-        self._busy_start("Пинг всех узлов…")
+        self._busy_start("ping all nodes…")
         self._ping_all_worker()
 
     @work(thread=True)
@@ -277,14 +275,14 @@ class VpnApp(App):
 
     def _ping_all_done(self):
         vt.save_results(self.results)
-        self._busy_end("Пинг всех завершён")
+        self._busy_end("ping all done")
 
     # ------------------------------------------------------------- test
     def action_test(self):
         idx = self._sel()
         if idx is None:
             return
-        self._busy_start("Тест #%d %s…" % (idx, vt.short_name(self.nodes[idx])))
+        self._busy_start("test #%d %s…" % (idx, vt.short_name(self.nodes[idx])))
         self._test_worker(idx)
 
     @work(thread=True)
@@ -296,11 +294,11 @@ class VpnApp(App):
         r = self.results.setdefault(vt.node_key(self.nodes[idx]), {})
         if res is None:
             r.update({"exit_ip": None, "country": None, "exit_ms": None})
-            msg = "Тест #%d: ✗ не работает" % idx
+            msg = "test #%d: ✗ failed" % idx
         else:
             r.update(res)
             vt.record_history(self.nodes[idx], res)
-            msg = "Тест #%d: ✓ %s %s %dms" % (idx, res.get("country"),
+            msg = "test #%d: ✓ %s %s %dms" % (idx, res.get("country"),
                                               res.get("exit_ip"),
                                               res.get("exit_ms"))
         vt.save_results(self.results)
@@ -312,7 +310,7 @@ class VpnApp(App):
         idx = self._sel()
         if idx is None:
             return
-        self._busy_start("Скорость #%d %s…" % (idx, vt.short_name(self.nodes[idx])))
+        self._busy_start("speed #%d %s…" % (idx, vt.short_name(self.nodes[idx])))
         self._speed_worker(idx)
 
     @work(thread=True)
@@ -324,11 +322,11 @@ class VpnApp(App):
         r = self.results.setdefault(vt.node_key(self.nodes[idx]), {})
         if res is None:
             r["speed_mbps"] = None
-            msg = "Скорость #%d: ✗ не измерилась" % idx
+            msg = "speed #%d: ✗ failed" % idx
         else:
             r.update(res)
             vt.record_history(self.nodes[idx], res)
-            msg = "Скорость #%d: %s Mbps" % (idx, res["speed_mbps"])
+            msg = "speed #%d: %s Mbps" % (idx, res["speed_mbps"])
         vt.save_results(self.results)
         self._refresh_row(idx)
         self._busy_end(msg)
@@ -340,7 +338,7 @@ class VpnApp(App):
     def _connect(self, idx):
         if idx is None or not (0 <= idx < len(self.nodes)):
             return
-        self._busy_start("Подключение к #%d %s…" %
+        self._busy_start("connecting #%d %s…" %
                          (idx, vt.short_name(self.nodes[idx])))
         self._connect_worker(idx)
 
@@ -351,16 +349,16 @@ class VpnApp(App):
 
     def _connect_done(self, idx, ok):
         name = vt.short_name(self.nodes[idx])
-        self._busy_end(("✓ Подключено к #%d %s" % (idx, name)) if ok
-                       else "✗ Не удалось подключиться к #%d" % idx)
+        self._busy_end(("✓ connected #%d %s" % (idx, name)) if ok
+                       else "✗ failed to connect #%d" % idx)
         self.refresh_status()
 
     def action_auto(self):
-        self._busy_start("Подключение auto…")
+        self._busy_start("connecting auto…")
         self._select_worker("auto")
 
     def action_best(self):
-        self._busy_start("Подключение best…")
+        self._busy_start("connecting best…")
         self._select_worker("best")
 
     @work(thread=True)
@@ -369,13 +367,13 @@ class VpnApp(App):
         self.call_from_thread(self._select_done, sel, ok)
 
     def _select_done(self, sel, ok):
-        self._busy_end(("✓ Подключено: %s" % sel) if ok
-                       else "✗ Не удалось: %s" % sel)
+        self._busy_end(("✓ connected: %s" % sel) if ok
+                       else "✗ failed: %s" % sel)
         self.refresh_status()
 
     # ------------------------------------------------------------- refresh
     def action_refresh(self):
-        self._busy_start("Обновление подписки…")
+        self._busy_start("refreshing subscription…")
         self._refresh_worker()
 
     @work(thread=True)
@@ -387,14 +385,14 @@ class VpnApp(App):
         self.nodes = nodes
         self.results = vt.load_results()
         self._rebuild_table()
-        self._busy_end("Подписка обновлена: %d узлов" % len(nodes))
+        self._busy_end("subscription refreshed: %d nodes" % len(nodes))
         self.refresh_status()
 
     # ------------------------------------------------------------- toggle
     def action_toggle(self):
         on = (self.status or {}).get("active") == "active"
         target = not on
-        self._busy_start("Отключение VPN…" if on else "Включение VPN…")
+        self._busy_start("disabling vpn…" if on else "enabling vpn…")
         self._toggle_worker(target)
 
     @work(thread=True)
@@ -405,27 +403,6 @@ class VpnApp(App):
     def _toggle_done(self):
         self._busy_end("")
         self.refresh_status()
-
-    # ------------------------------------------------------------- buttons
-    @on(Button.Pressed, "#power")
-    def _press_power(self):
-        self.action_toggle()
-
-    @on(Button.Pressed, "#auto")
-    def _press_auto(self):
-        self.action_auto()
-
-    @on(Button.Pressed, "#best")
-    def _press_best(self):
-        self.action_best()
-
-    @on(Button.Pressed, "#refresh")
-    def _press_refresh(self):
-        self.action_refresh()
-
-    @on(Button.Pressed, "#quit")
-    def _press_quit(self):
-        self.exit()
 
 
 def main():
