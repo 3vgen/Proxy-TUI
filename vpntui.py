@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """Textual TUI for the VLESS Reality subscription manager.
 
-Keyboard-driven, minimal, terminal-native interface (OpenCode-like): a single
-status line up top (VPN state · target · egress), a plain node table, and a dim
-footer with key bindings. Arrow keys select a node, Enter (or click) connects.
+Modern dashboard-style interface: a top status bar, a split view (node list /
+test history on the left, a live detail panel on the right) and a footer with
+contextual key bindings. Fully keyboard-driven.
 """
+import datetime
 import os
 import sys
 
@@ -15,17 +16,66 @@ import vpntool as vt
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
-from textual.widgets import Static, DataTable, LoadingIndicator
+from textual.containers import Container, Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, LoadingIndicator, Static
 from textual import on, work
 from rich.text import Text
 
-COL_IDX = "idx"
-COL_NAME = "name"
-COL_HOST = "host"
-COL_PING = "ping"
-COL_EXIT = "exit"
-COLUMNS = (COL_IDX, COL_NAME, COL_HOST, COL_PING, COL_EXIT)
+# node table columns
+C_IDX = "idx"
+C_NAME = "name"
+C_HOST = "host"
+C_PING = "ping"
+C_EXIT = "exit"
+C_SPEED = "speed"
+NODE_COLS = (C_IDX, C_NAME, C_HOST, C_PING, C_EXIT, C_SPEED)
+
+# history table columns
+H_TIME = "time"
+H_NAME = "name"
+H_COUNTRY = "country"
+H_IP = "ip"
+H_MS = "ms"
+H_SPEED = "speed"
+HIST_COLS = (H_TIME, H_NAME, H_COUNTRY, H_IP, H_MS, H_SPEED)
+
+HELP_TEXT = """\
+keys
+────────────────────────────────────────────
+↑ / ↓  or  j / k   select
+enter              connect to selected node
+p                  ping selected node
+P                  ping all nodes
+t                  full test (egress) of selected node
+s                  speed test of selected node
+a                  connect auto (urltest, non-RU)
+b                  connect best (fastest foreign)
+o                  vpn on / off
+r                  refresh subscription
+g                  refresh status
+h                  switch view: nodes ↔ history
+?                  this help
+q                  quit
+
+legend
+────────────────────────────────────────────
+green   working foreign exit
+yellow  exit in RU (useless for OpenAI/Anthropic)
+red     node unreachable
+▸       currently connected node
+"""
+
+
+class HelpScreen(ModalScreen):
+    BINDINGS = [Binding("escape,question_mark,q", "dismiss", "Close", show=False)]
+
+    def compose(self) -> ComposeResult:
+        with Container(id="help"):
+            yield Static(HELP_TEXT, id="help-text")
+
+    def action_dismiss(self):
+        self.dismiss()
 
 
 class VpnApp(App):
@@ -41,6 +91,8 @@ class VpnApp(App):
         Binding("r", "refresh", "Refresh", show=False),
         Binding("o", "toggle", "VPN on/off", show=False),
         Binding("g", "status", "Status", show=False),
+        Binding("h", "switch_view", "History", show=False),
+        Binding("question_mark", "help", "Help", show=False),
         Binding("j", "move_down", "", show=False),
         Binding("k", "move_up", "", show=False),
         Binding("q", "quit", "Quit", show=False),
@@ -51,54 +103,98 @@ class VpnApp(App):
         height: 1;
         padding: 0 1;
         border-bottom: solid $panel;
+        background: $boost;
     }
     #statustext { width: 1fr; }
+    #statusright { width: auto; color: $text-muted; }
     #spinner { width: 2; height: 1; display: none; }
-    #nodes {
-        height: 1fr;
-        border: none;
+
+    #body { height: 1fr; }
+
+    #left { width: 1fr; height: 1fr; }
+    #left-title {
+        height: 1;
         padding: 0 1;
+        color: $text-muted;
+        text-style: bold;
     }
-    #nodes:focus { border: none; }
+    #nodes, #history { height: 1fr; border: none; padding: 0 1; }
+
     DataTable { background: transparent; }
     DataTable > .datatable--header {
         background: transparent;
         color: $text-muted;
         text-style: bold;
     }
-    DataTable > .datatable--cursor {
-        background: $boost;
-        color: $text;
+    DataTable > .datatable--cursor { background: $boost; }
+
+    #detail {
+        width: 34;
+        height: 1fr;
+        border-left: solid $panel;
+        padding: 0 1;
+        background: transparent;
     }
+    #detail-title {
+        height: 1;
+        color: $text-muted;
+        text-style: bold;
+    }
+    #detail-content { height: 1fr; }
+
     #notify {
         height: 1;
         padding: 0 1;
         color: $text-muted;
         border-top: solid $panel;
     }
+
+    HelpScreen { align: center middle; }
+    #help {
+        width: 62;
+        max-height: 80%;
+        border: round $panel;
+        background: $surface;
+        padding: 1 2;
+    }
+    #help-text { height: auto; }
     """
 
     HINT = ("↑↓ select   enter connect   p ping   P ping all   t test   "
-            "s speed   a auto   b best   o vpn on/off   r refresh   q quit")
+            "s speed   a auto   b best   o vpn   r refresh   g status   "
+            "h nodes/history   ? help   q quit")
 
     def __init__(self):
         super().__init__()
         self.nodes = []
         self.results = {}
+        self.hist = []
         self.status = {}
         self.target_idx = None
         self.busy = 0
+        self.view = "nodes"
 
     # ------------------------------------------------------------- compose
     def compose(self) -> ComposeResult:
         with Horizontal(id="statusbar"):
             yield Static("", id="statustext")
             yield LoadingIndicator(id="spinner")
-        yield DataTable(id="nodes", cursor_type="row")
+            yield Static("", id="statusright")
+        with Horizontal(id="body"):
+            with Vertical(id="left"):
+                yield Static("", id="left-title")
+                yield DataTable(id="nodes", cursor_type="row")
+                yield DataTable(id="history", cursor_type="row")
+            with Vertical(id="detail"):
+                yield Static("details", id="detail-title")
+                yield Static("", id="detail-content")
         yield Static(self.HINT, id="notify")
 
-    def _table(self) -> DataTable:
+    def _nodes_table(self) -> DataTable:
         return self.query_one("#nodes", DataTable)
+
+    def _history_table(self) -> DataTable:
+        return self.query_one("#history", DataTable)
 
     def _spinner(self) -> LoadingIndicator:
         return self.query_one("#spinner", LoadingIndicator)
@@ -106,20 +202,71 @@ class VpnApp(App):
     def _notify(self) -> Static:
         return self.query_one("#notify", Static)
 
+    # ------------------------------------------------------------- mount
     def on_mount(self):
         self.nodes = vt.load_nodes()
         self.results = vt.load_results()
-        table = self._table()
-        table.add_column("#", key=COL_IDX, width=4)
-        table.add_column("node", key=COL_NAME, width=28)
-        table.add_column("host", key=COL_HOST, width=22)
-        table.add_column("ping", key=COL_PING, width=8)
-        table.add_column("exit", key=COL_EXIT, width=16)
-        self._rebuild_table()
-        table.focus()
+        self.hist = list(reversed(vt.load_history()))
+
+        nodes = self._nodes_table()
+        nodes.add_column("#", key=C_IDX, width=3)
+        nodes.add_column("node", key=C_NAME, width=22)
+        nodes.add_column("host", key=C_HOST, width=20)
+        nodes.add_column("ping", key=C_PING, width=7)
+        nodes.add_column("exit", key=C_EXIT, width=13)
+        nodes.add_column("speed", key=C_SPEED, width=7)
+
+        hist = self._history_table()
+        hist.add_column("time", key=H_TIME, width=12)
+        hist.add_column("node", key=H_NAME, width=26)
+        hist.add_column("country", key=H_COUNTRY, width=8)
+        hist.add_column("exit ip", key=H_IP, width=16)
+        hist.add_column("ms", key=H_MS, width=7)
+        hist.add_column("speed", key=H_SPEED, width=8)
+
+        self._rebuild_nodes()
+        self._rebuild_history()
+        self._apply_view()
+        nodes.focus()
         self.refresh_status()
 
-    # ------------------------------------------------------------- render
+    # ------------------------------------------------------------- view
+    def _apply_view(self):
+        nodes = self._nodes_table()
+        hist = self._history_table()
+        title = self.query_one("#left-title", Static)
+        if self.view == "nodes":
+            nodes.display = True
+            hist.display = False
+            title.update("nodes")
+            nodes.focus()
+        else:
+            nodes.display = False
+            hist.display = True
+            title.update("history")
+            hist.focus()
+        self._render_detail()
+
+    def action_switch_view(self):
+        self.view = "history" if self.view == "nodes" else "nodes"
+        self._apply_view()
+
+    def action_help(self):
+        self.push_screen(HelpScreen())
+
+    def _active_table(self) -> DataTable:
+        return self._nodes_table() if self.view == "nodes" else self._history_table()
+
+    def _sel(self):
+        table = self._active_table()
+        row = table.cursor_row
+        rows = len(self.nodes) if self.view == "nodes" else len(self.hist)
+        return row if 0 <= row < rows else None
+
+    def _node_sel(self):
+        return self._sel() if self.view == "nodes" else None
+
+    # ------------------------------------------------------------- render: nodes
     def _node_style(self, i):
         r = self.results.get(vt.node_key(self.nodes[i]), {})
         if r.get("exit_ip") and r.get("country") != "RU":
@@ -130,7 +277,7 @@ class VpnApp(App):
             return "red"
         return "default"
 
-    def _row_cells(self, i):
+    def _node_row_cells(self, i):
         n = self.nodes[i]
         r = self.results.get(vt.node_key(n), {})
         st = self._node_style(i)
@@ -153,46 +300,163 @@ class VpnApp(App):
             exit_t = Text("✗", style="red")
         else:
             exit_t = Text("—", style="dim")
-        return (idx_t, name_t, host_t, ping_t, exit_t)
 
-    def _refresh_row(self, i):
-        cells = self._row_cells(i)
-        for col, val in zip(COLUMNS, cells):
-            self._table().update_cell(str(i), col, val)
+        spd = r.get("speed_mbps")
+        speed_t = Text(("%.0f" % spd) if spd else "—", style="dim")
 
-    def _refresh_all_rows(self):
+        return (idx_t, name_t, host_t, ping_t, exit_t, speed_t)
+
+    def _refresh_node_row(self, i):
+        cells = self._node_row_cells(i)
+        for col, val in zip(NODE_COLS, cells):
+            self._nodes_table().update_cell(str(i), col, val)
+
+    def _refresh_all_nodes(self):
         for i in range(len(self.nodes)):
-            self._refresh_row(i)
+            self._refresh_node_row(i)
 
-    def _rebuild_table(self):
-        table = self._table()
-        table.clear()
+    def _rebuild_nodes(self):
+        t = self._nodes_table()
+        t.clear()
         for i in range(len(self.nodes)):
-            table.add_row(*self._row_cells(i), key=str(i))
+            t.add_row(*self._node_row_cells(i), key=str(i))
         if self.nodes:
-            table.move_cursor(row=0)
+            t.move_cursor(row=0)
 
+    # ------------------------------------------------------------- render: history
+    def _hist_row_cells(self, i):
+        rec = self.hist[i]
+        ts = datetime.datetime.fromtimestamp(rec["ts"]).strftime("%m-%d %H:%M")
+        name = rec.get("name") or ("%s:%d" % (rec["host"], rec["port"]))
+        country = rec.get("country") or "—"
+        ip = rec.get("exit_ip") or "—"
+        ms = ("%d" % rec["exit_ms"]) if rec.get("exit_ms") is not None else "—"
+        spd = ("%.0f" % rec["speed_mbps"]) if rec.get("speed_mbps") else "—"
+        return (Text(ts, style="dim"), Text(name), Text(country),
+                Text(ip, style="dim"), Text(ms), Text(spd, style="dim"))
+
+    def _rebuild_history(self):
+        t = self._history_table()
+        t.clear()
+        for i in range(len(self.hist)):
+            t.add_row(*self._hist_row_cells(i), key=str(i))
+        if self.hist:
+            t.move_cursor(row=0)
+
+    # ------------------------------------------------------------- render: detail
+    def _detail(self) -> Static:
+        return self.query_one("#detail-content", Static)
+
+    def _render_detail(self):
+        if self.view == "nodes":
+            self._render_node_detail()
+        else:
+            self._render_history_detail()
+
+    def _kv(self, key, value, style=None):
+        t = Text()
+        t.append(" %s" % key.ljust(8), style="dim")
+        t.append(value, style=style)
+        t.append("\n")
+        return t
+
+    def _divider(self):
+        t = Text()
+        t.append(" " + "─" * 30 + "\n", style="dim")
+        return t
+
+    def _render_node_detail(self):
+        d = self._detail()
+        idx = self._node_sel()
+        if idx is None:
+            d.update(Text(""))
+            return
+        n = self.nodes[idx]
+        r = self.results.get(vt.node_key(n), {})
+        connected = (self.target_idx == idx)
+        st = self._node_style(idx)
+
+        t = Text()
+        t.append("▸ " if connected else "  ")
+        t.append(vt.short_name(n) + "\n",
+                 style="bold green" if connected else ("bold " + st if st != "default" else "bold"))
+        t.append(self._divider())
+        t.append(self._kv("host", "%s:%d" % (n["host"], n["port"])))
+        t.append(self._kv("sni", n["sni"]))
+        t.append(self._kv("fp", n["fp"]))
+        t.append(self._kv("flow", n["flow"]))
+        t.append(self._kv("uuid", n["uuid"][:12] + "…"))
+        t.append(self._divider())
+        t.append(self._kv("exit", "%s %s" % (r.get("country") or "—",
+                                             r.get("city") or "")))
+        t.append(self._kv("ip", r.get("exit_ip") or "—"))
+        t.append(self._kv("latency", ("%d ms" % r["exit_ms"])
+                          if r.get("exit_ms") is not None else "—"))
+        t.append(self._kv("speed", ("%.1f Mbps" % r["speed_mbps"])
+                          if r.get("speed_mbps") else "—"))
+        t.append(self._divider())
+        recent = [h for h in self.hist
+                  if h.get("host") == n["host"] and h.get("port") == n["port"]][:4]
+        t.append(" " + "recent" + "\n", style="bold")
+        if recent:
+            for h in recent:
+                ts = datetime.datetime.fromtimestamp(h["ts"]).strftime("%H:%M")
+                line = "  %s  %s  %dms  %s" % (
+                    ts, h.get("country") or "--",
+                    h.get("exit_ms") or 0,
+                    ("%.0fM" % h["speed_mbps"]) if h.get("speed_mbps") else "")
+                t.append(line + "\n", style="dim")
+        else:
+            t.append("  no tests yet\n", style="dim")
+        d.update(t)
+
+    def _render_history_detail(self):
+        d = self._detail()
+        idx = self._sel()
+        if idx is None:
+            d.update(Text(""))
+            return
+        rec = self.hist[idx]
+        ts = datetime.datetime.fromtimestamp(rec["ts"]).strftime("%Y-%m-%d %H:%M:%S")
+        t = Text()
+        t.append(rec.get("name") or ("%s:%d" % (rec["host"], rec["port"])))
+        t.append("\n")
+        t.append(self._divider())
+        t.append(self._kv("time", ts))
+        t.append(self._kv("host", "%s:%d" % (rec["host"], rec["port"])))
+        t.append(self._kv("country", rec.get("country") or "—"))
+        t.append(self._kv("exit ip", rec.get("exit_ip") or "—"))
+        t.append(self._kv("latency", ("%d ms" % rec["exit_ms"])
+                          if rec.get("exit_ms") is not None else "—"))
+        t.append(self._kv("speed", ("%.1f Mbps" % rec["speed_mbps"])
+                          if rec.get("speed_mbps") else "—"))
+        d.update(t)
+
+    # ------------------------------------------------------------- status bar
     def _render_statusbar(self):
         s = self.status or {}
         on = s.get("active") == "active"
         target = s.get("target") or s.get("final") or "—"
-        t = Text()
-        t.append("vpn ", style="bold")
-        t.append("●", style="green" if on else "red")
-        t.append(" %s" % ("on" if on else "off"),
-                 style="bold green" if on else "bold red")
-        t.append("   ")
-        t.append(target, style="bold")
-        t.append("   ")
-        t.append("%s · %s" % (s.get("country") or "—", s.get("egress") or "—"),
-                 style="cyan")
-        self.query_one("#statustext", Static).update(t)
+
+        left = Text()
+        left.append("vpn ", style="bold")
+        left.append("●", style="green" if on else "red")
+        left.append(" %s" % ("on" if on else "off"),
+                    style="bold green" if on else "bold red")
+        left.append("   ")
+        left.append(target, style="bold")
+        left.append("   ")
+        left.append("%s · %s" % (s.get("country") or "—", s.get("egress") or "—"),
+                    style="cyan")
+        self.query_one("#statustext", Static).update(left)
+
+        up = sum(1 for n in self.nodes
+                 if self.results.get(vt.node_key(n), {}).get("exit_ip")
+                 and self.results.get(vt.node_key(n), {}).get("country") != "RU")
+        self.query_one("#statusright", Static).update(
+            "%d nodes · %d up" % (len(self.nodes), up))
 
     # ------------------------------------------------------------- helpers
-    def _sel(self):
-        row = self._table().cursor_row
-        return row if self.nodes and 0 <= row < len(self.nodes) else None
-
     def _busy_start(self, msg):
         self.busy += 1
         self._spinner().display = True
@@ -223,7 +487,8 @@ class VpnApp(App):
         self.status = s
         self.target_idx = self._target_idx_from_status()
         self._render_statusbar()
-        self._refresh_all_rows()
+        self._refresh_all_nodes()
+        self._render_detail()
 
     def action_status(self):
         self._busy_start("refreshing status…")
@@ -231,15 +496,20 @@ class VpnApp(App):
 
     # ------------------------------------------------------------- navigation
     def action_move_down(self):
-        self._table().action_cursor_down()
+        self._active_table().action_cursor_down()
 
     def action_move_up(self):
-        self._table().action_cursor_up()
+        self._active_table().action_cursor_up()
+
+    @on(DataTable.RowHighlighted)
+    def _on_row_highlighted(self):
+        self._render_detail()
 
     # ------------------------------------------------------------- ping
     def action_ping(self):
-        idx = self._sel()
+        idx = self._node_sel()
         if idx is None:
+            self._notify().update("switch to nodes view (h)")
             return
         self._busy_start("ping #%d %s…" % (idx, vt.short_name(self.nodes[idx])))
         self._ping_worker(idx)
@@ -253,7 +523,8 @@ class VpnApp(App):
         r = self.results.setdefault(vt.node_key(self.nodes[idx]), {})
         r["handshake_ms"] = ms
         vt.save_results(self.results)
-        self._refresh_row(idx)
+        self._refresh_node_row(idx)
+        self._render_detail()
         self._busy_end("ping #%d: %s" % (idx, "%dms" % ms
                        if ms is not None else "unreachable"))
 
@@ -271,16 +542,18 @@ class VpnApp(App):
     def _ping_all_step(self, i, ms):
         r = self.results.setdefault(vt.node_key(self.nodes[i]), {})
         r["handshake_ms"] = ms
-        self._refresh_row(i)
+        self._refresh_node_row(i)
 
     def _ping_all_done(self):
         vt.save_results(self.results)
+        self._render_detail()
         self._busy_end("ping all done")
 
     # ------------------------------------------------------------- test
     def action_test(self):
-        idx = self._sel()
+        idx = self._node_sel()
         if idx is None:
+            self._notify().update("switch to nodes view (h)")
             return
         self._busy_start("test #%d %s…" % (idx, vt.short_name(self.nodes[idx])))
         self._test_worker(idx)
@@ -298,17 +571,21 @@ class VpnApp(App):
         else:
             r.update(res)
             vt.record_history(self.nodes[idx], res)
+            self.hist = list(reversed(vt.load_history()))
+            self._rebuild_history()
             msg = "test #%d: ✓ %s %s %dms" % (idx, res.get("country"),
                                               res.get("exit_ip"),
                                               res.get("exit_ms"))
         vt.save_results(self.results)
-        self._refresh_row(idx)
+        self._refresh_node_row(idx)
+        self._render_detail()
         self._busy_end(msg)
 
     # ------------------------------------------------------------- speed
     def action_speed(self):
-        idx = self._sel()
+        idx = self._node_sel()
         if idx is None:
+            self._notify().update("switch to nodes view (h)")
             return
         self._busy_start("speed #%d %s…" % (idx, vt.short_name(self.nodes[idx])))
         self._speed_worker(idx)
@@ -326,14 +603,18 @@ class VpnApp(App):
         else:
             r.update(res)
             vt.record_history(self.nodes[idx], res)
+            self.hist = list(reversed(vt.load_history()))
+            self._rebuild_history()
             msg = "speed #%d: %s Mbps" % (idx, res["speed_mbps"])
         vt.save_results(self.results)
-        self._refresh_row(idx)
+        self._refresh_node_row(idx)
+        self._render_detail()
         self._busy_end(msg)
 
     # ------------------------------------------------------------- connect
     def on_data_table_row_selected(self, event):
-        self._connect(event.cursor_row)
+        if self.view == "nodes":
+            self._connect(event.cursor_row)
 
     def _connect(self, idx):
         if idx is None or not (0 <= idx < len(self.nodes)):
@@ -384,7 +665,7 @@ class VpnApp(App):
     def _refresh_done(self, nodes):
         self.nodes = nodes
         self.results = vt.load_results()
-        self._rebuild_table()
+        self._rebuild_nodes()
         self._busy_end("subscription refreshed: %d nodes" % len(nodes))
         self.refresh_status()
 
