@@ -9,7 +9,7 @@
 #
 # Fix: mark inbound connections (conntrack) and route their reply packets
 # through the main table (direct) via an ip rule, bypassing the tunnel.
-# Ports are configurable via BYPASS_PORTS (space separated), default "22 80 443".
+# Ports are configurable via BYPASS_PORTS (space separated), default "22 80 443 3000".
 # This is additive and independent of sing-box (survives `vpn use ...` restarts).
 
 set -u
@@ -20,7 +20,7 @@ IP="ip"
 TABLE="vpn_ssh_bypass"
 MARK="0x1"
 RULE_PREF="8500"      # must be < 9000 (sing-box's own rules) so it wins
-BYPASS_PORTS="${BYPASS_PORTS:-22 80 443}"
+BYPASS_PORTS="${BYPASS_PORTS:-22 80 443 3000}"
 
 install() {
   "$NFT" add table inet "$TABLE" 2>/dev/null || true
@@ -28,10 +28,19 @@ install() {
     '{ type filter hook prerouting priority mangle; policy accept; }' 2>/dev/null || true
   "$NFT" add chain inet "$TABLE" output \
     '{ type route hook output priority mangle; policy accept; }' 2>/dev/null || true
+  "$NFT" flush chain inet "$TABLE" prerouting 2>/dev/null || true
+  "$NFT" flush chain inet "$TABLE" output 2>/dev/null || true
   for p in $BYPASS_PORTS; do
+    # Метим только ВХОДЯЩИЕ соединения (на локальный адрес сервера), чтобы не
+    # зацепить форвардинг LAN-устройств (например ТВ через vpn_tv_gateway),
+    # чей исходящий трафик тоже имеет dport 80/443 и должен идти через тун.
     "$NFT" add rule inet "$TABLE" prerouting tcp dport "$p" \
-      ct mark set "$MARK" 2>/dev/null || true
+      fib daddr type local ct mark set "$MARK" 2>/dev/null || true
   done
+  # Replies of forwarded connections (Docker-published ports) go through the
+  # prerouting hook, not output; mark them too so they bypass the TUN as well.
+  "$NFT" add rule inet "$TABLE" prerouting ct mark "$MARK" \
+    meta mark set "$MARK" 2>/dev/null || true
   "$NFT" add rule inet "$TABLE" output ct mark "$MARK" \
     meta mark set "$MARK" 2>/dev/null || true
 

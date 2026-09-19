@@ -416,6 +416,10 @@ def build_global_config(nodes, final, auto_tags=None):
 
     tun = cfg["inbounds"][0]
     excludes = ["%s/32" % resolve_ip(n) for n in nodes]
+    # Локальные/приватные сети НЕ гнать в тун: иначе ответы LAN-устройствам
+    # (например ТВ через tv-vpn) заворачиваются обратно в тун и зацикливаются.
+    excludes += ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12",
+                 "127.0.0.0/8", "169.254.0.0/16"]
     tun["route_exclude_address"] = excludes
 
     cfg["route"] = route

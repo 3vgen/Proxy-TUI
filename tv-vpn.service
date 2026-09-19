@@ -1,0 +1,11 @@
+[Unit]
+Description=TV VPN gateway masquerade (nftables)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/evgeniy/vpn-tool/tv-vpn.sh install
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
