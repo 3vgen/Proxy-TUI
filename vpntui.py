@@ -4,7 +4,8 @@
 
 Modern dashboard-style interface: a top status bar, a split view (node list /
 test history on the left, a live detail panel on the right) and a footer with
-contextual key bindings. Fully keyboard-driven.
+contextual key bindings. Fully keyboard-driven. The connected node is green,
+everything else is gray; a spinner appears on the row while connecting.
 """
 import datetime
 import os
@@ -40,6 +41,8 @@ H_MS = "ms"
 H_SPEED = "speed"
 HIST_COLS = (H_TIME, H_NAME, H_COUNTRY, H_IP, H_MS, H_SPEED)
 
+SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
 HELP_TEXT = """\
 keys
 ────────────────────────────────────────────
@@ -60,10 +63,9 @@ q                  quit
 
 legend
 ────────────────────────────────────────────
-green   working foreign exit
-yellow  exit in RU (useless for OpenAI/Anthropic)
-red     node unreachable
-▸       currently connected node
+green    currently connected node
+spinner  connecting to a node
+gray     everything else
 """
 
 
@@ -169,10 +171,15 @@ class VpnApp(App):
         self.nodes = []
         self.results = {}
         self.hist = []
+        self._recent = {}
         self.status = {}
         self.target_idx = None
+        self.connecting_idx = None
         self.busy = 0
         self.view = "nodes"
+        self._spin_frame = 0
+        self._spin_timer = None
+        self._detail_key = None
 
     # ------------------------------------------------------------- compose
     def compose(self) -> ComposeResult:
@@ -207,6 +214,7 @@ class VpnApp(App):
         self.nodes = vt.load_nodes()
         self.results = vt.load_results()
         self.hist = list(reversed(vt.load_history()))
+        self._build_recent()
 
         nodes = self._nodes_table()
         nodes.add_column("#", key=C_IDX, width=3)
@@ -230,6 +238,14 @@ class VpnApp(App):
         nodes.focus()
         self.refresh_status()
 
+    def _build_recent(self):
+        self._recent = {}
+        for h in self.hist:
+            key = "%s:%d" % (h["host"], h["port"])
+            lst = self._recent.setdefault(key, [])
+            if len(lst) < 4:
+                lst.append(h)
+
     # ------------------------------------------------------------- view
     def _apply_view(self):
         nodes = self._nodes_table()
@@ -245,6 +261,7 @@ class VpnApp(App):
             hist.display = True
             title.update("history")
             hist.focus()
+        self._detail_key = None
         self._render_detail()
 
     def action_switch_view(self):
@@ -266,38 +283,51 @@ class VpnApp(App):
     def _node_sel(self):
         return self._sel() if self.view == "nodes" else None
 
-    # ------------------------------------------------------------- render: nodes
-    def _node_style(self, i):
-        r = self.results.get(vt.node_key(self.nodes[i]), {})
-        if r.get("exit_ip") and r.get("country") != "RU":
-            return "green"
-        if r.get("exit_ip") and r.get("country") == "RU":
-            return "yellow"
-        if r.get("exit_ip") is None and r.get("handshake_ms") is None:
-            return "red"
-        return "default"
+    # ------------------------------------------------------------- spinner
+    def _start_spinner(self):
+        if self._spin_timer is None:
+            self._spin_timer = self.set_interval(0.09, self._tick_spinner)
 
+    def _stop_spinner(self):
+        if self._spin_timer is not None:
+            self._spin_timer.stop()
+            self._spin_timer = None
+
+    def _tick_spinner(self):
+        self._spin_frame = (self._spin_frame + 1) % len(SPIN)
+        if self.connecting_idx is not None:
+            self._refresh_node_row(self.connecting_idx)
+        self._render_detail(force=True)
+
+    # ------------------------------------------------------------- render: nodes
     def _node_row_cells(self, i):
         n = self.nodes[i]
         r = self.results.get(vt.node_key(n), {})
-        st = self._node_style(i)
         connected = (self.target_idx == i)
+        connecting = (self.connecting_idx == i)
+
+        if connecting:
+            prefix = SPIN[self._spin_frame] + " "
+            name_style = "green"
+        elif connected:
+            prefix = "▸ "
+            name_style = "bold green"
+        else:
+            prefix = "  "
+            name_style = "dim"
 
         idx_t = Text(str(i), style="dim")
-        name_t = Text(("▸ " if connected else "") + vt.short_name(n), style=st)
-        if connected:
-            name_t.stylize("bold")
+        name_t = Text(prefix + vt.short_name(n), style=name_style)
         host_t = Text("%s:%d" % (n["host"], n["port"]), style="dim")
 
         hs = r.get("handshake_ms")
-        ping_t = Text(("%dms" % hs) if hs is not None else "—",
-                      style=("default" if hs is None else st))
+        ping_t = Text(("%dms" % hs) if hs is not None else "—", style="dim")
 
         ex = r.get("exit_ms")
         if ex is not None:
-            exit_t = Text("%s %dms" % (r.get("country") or "", ex), style=st)
+            exit_t = Text("%s %dms" % (r.get("country") or "", ex), style="dim")
         elif "exit_ip" in r and r.get("exit_ip") is None:
-            exit_t = Text("✗", style="red")
+            exit_t = Text("✗", style="dim")
         else:
             exit_t = Text("—", style="dim")
 
@@ -310,10 +340,6 @@ class VpnApp(App):
         cells = self._node_row_cells(i)
         for col, val in zip(NODE_COLS, cells):
             self._nodes_table().update_cell(str(i), col, val)
-
-    def _refresh_all_nodes(self):
-        for i in range(len(self.nodes)):
-            self._refresh_node_row(i)
 
     def _rebuild_nodes(self):
         t = self._nodes_table()
@@ -347,7 +373,11 @@ class VpnApp(App):
     def _detail(self) -> Static:
         return self.query_one("#detail-content", Static)
 
-    def _render_detail(self):
+    def _render_detail(self, force=False):
+        key = (self.view, self._sel())
+        if not force and key == self._detail_key:
+            return
+        self._detail_key = key
         if self.view == "nodes":
             self._render_node_detail()
         else:
@@ -374,12 +404,18 @@ class VpnApp(App):
         n = self.nodes[idx]
         r = self.results.get(vt.node_key(n), {})
         connected = (self.target_idx == idx)
-        st = self._node_style(idx)
+        connecting = (self.connecting_idx == idx)
 
         t = Text()
-        t.append("▸ " if connected else "  ")
-        t.append(vt.short_name(n) + "\n",
-                 style="bold green" if connected else ("bold " + st if st != "default" else "bold"))
+        if connecting:
+            t.append(SPIN[self._spin_frame] + " ")
+            t.append(vt.short_name(n), style="green")
+            t.append("  connecting…", style="green")
+            t.append("\n")
+        elif connected:
+            t.append("▸ " + vt.short_name(n) + "\n", style="bold green")
+        else:
+            t.append("  " + vt.short_name(n) + "\n", style="dim")
         t.append(self._divider())
         t.append(self._kv("host", "%s:%d" % (n["host"], n["port"])))
         t.append(self._kv("sni", n["sni"]))
@@ -395,9 +431,8 @@ class VpnApp(App):
         t.append(self._kv("speed", ("%.1f Mbps" % r["speed_mbps"])
                           if r.get("speed_mbps") else "—"))
         t.append(self._divider())
-        recent = [h for h in self.hist
-                  if h.get("host") == n["host"] and h.get("port") == n["port"]][:4]
         t.append(" " + "recent" + "\n", style="bold")
+        recent = self._recent.get(vt.node_key(n), [])
         if recent:
             for h in recent:
                 ts = datetime.datetime.fromtimestamp(h["ts"]).strftime("%H:%M")
@@ -485,10 +520,14 @@ class VpnApp(App):
 
     def _apply_status(self, s):
         self.status = s
-        self.target_idx = self._target_idx_from_status()
+        new_target = self._target_idx_from_status()
+        prev = self.target_idx
+        self.target_idx = new_target
         self._render_statusbar()
-        self._refresh_all_nodes()
-        self._render_detail()
+        for i in {prev, new_target}:
+            if i is not None and 0 <= i < len(self.nodes):
+                self._refresh_node_row(i)
+        self._render_detail(force=True)
 
     def action_status(self):
         self._busy_start("refreshing status…")
@@ -524,7 +563,7 @@ class VpnApp(App):
         r["handshake_ms"] = ms
         vt.save_results(self.results)
         self._refresh_node_row(idx)
-        self._render_detail()
+        self._render_detail(force=True)
         self._busy_end("ping #%d: %s" % (idx, "%dms" % ms
                        if ms is not None else "unreachable"))
 
@@ -546,7 +585,7 @@ class VpnApp(App):
 
     def _ping_all_done(self):
         vt.save_results(self.results)
-        self._render_detail()
+        self._render_detail(force=True)
         self._busy_end("ping all done")
 
     # ------------------------------------------------------------- test
@@ -572,13 +611,14 @@ class VpnApp(App):
             r.update(res)
             vt.record_history(self.nodes[idx], res)
             self.hist = list(reversed(vt.load_history()))
+            self._build_recent()
             self._rebuild_history()
             msg = "test #%d: ✓ %s %s %dms" % (idx, res.get("country"),
                                               res.get("exit_ip"),
                                               res.get("exit_ms"))
         vt.save_results(self.results)
         self._refresh_node_row(idx)
-        self._render_detail()
+        self._render_detail(force=True)
         self._busy_end(msg)
 
     # ------------------------------------------------------------- speed
@@ -604,11 +644,12 @@ class VpnApp(App):
             r.update(res)
             vt.record_history(self.nodes[idx], res)
             self.hist = list(reversed(vt.load_history()))
+            self._build_recent()
             self._rebuild_history()
             msg = "speed #%d: %s Mbps" % (idx, res["speed_mbps"])
         vt.save_results(self.results)
         self._refresh_node_row(idx)
-        self._render_detail()
+        self._render_detail(force=True)
         self._busy_end(msg)
 
     # ------------------------------------------------------------- connect
@@ -619,6 +660,13 @@ class VpnApp(App):
     def _connect(self, idx):
         if idx is None or not (0 <= idx < len(self.nodes)):
             return
+        if self.connecting_idx is not None:
+            return
+        self.connecting_idx = idx
+        self._spin_frame = 0
+        self._start_spinner()
+        self._refresh_node_row(idx)
+        self._render_detail(force=True)
         self._busy_start("connecting #%d %s…" %
                          (idx, vt.short_name(self.nodes[idx])))
         self._connect_worker(idx)
@@ -629,9 +677,13 @@ class VpnApp(App):
         self.call_from_thread(self._connect_done, idx, ok)
 
     def _connect_done(self, idx, ok):
+        self.connecting_idx = None
+        self._stop_spinner()
         name = vt.short_name(self.nodes[idx])
         self._busy_end(("✓ connected #%d %s" % (idx, name)) if ok
                        else "✗ failed to connect #%d" % idx)
+        self._refresh_node_row(idx)
+        self._render_detail(force=True)
         self.refresh_status()
 
     def action_auto(self):
